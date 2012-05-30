@@ -132,11 +132,55 @@ ALBUM_FIELDS = [
 ALBUM_KEYS = [f[0] for f in ALBUM_FIELDS]
 ALBUM_KEYS_ITEM = [f[0] for f in ALBUM_FIELDS if f[2]]
 
+# Database fields for the "playlist_items" table.
+# Tuple fields:
+# - name of the field
+# - The (SQLite) type of the field
+# - Is field writable?
+# - Is the field an attribute of a PlaylistItem?
+PLAYLIST_ITEM_FIELDS = [
+    ('id',          'integer primary key'),
+    ('playlist_id', 'integer'),
+    ('song_id',     'integer'),
+    ('position',    'integer'),
+    ('sequence',    'integer'),
+    ('version',     'integer'),
+]
+
+PLAYLIST_ITEM_KEYS =          [f[0] for f in PLAYLIST_ITEM_FIELDS]
+
+# Database fields for the "playlists" table.
+# Tuple fields:
+# - name of the field
+# - The (SQLite) type of the field
+# - Is field writable?
+# - Is the field an attribute of a Playlist?
+PLAYLIST_FIELDS = [
+    ('id',           'integer primary key', False,  False ),
+    ('title',        'text',                True,   True  ),
+    ('current_song', 'integer',             False,  False ),
+    ('version',      'integer',             False,  True  ),
+    ('repeat',       'bool',                True,   True  ),
+    ('single',       'bool',                True,   True  ),
+    ('consume',      'bool',                True,   True  ),
+    ('random',       'bool',                True,   True  ),
+
+]
+
+PLAYLIST_KEYS_WRITABLE = [f[0] for f in PLAYLIST_FIELDS if f[3] and f[2]]
+PLAYLIST_KEYS_META =     [f[0] for f in PLAYLIST_FIELDS if f[3]]
+PLAYLIST_KEYS =          [f[0] for f in PLAYLIST_FIELDS]
+
+
 # Default search fields for various granularities.
 ARTIST_DEFAULT_FIELDS = ('artist',)
 ALBUM_DEFAULT_FIELDS = ('album', 'albumartist', 'genre')
 ITEM_DEFAULT_FIELDS = ARTIST_DEFAULT_FIELDS + ALBUM_DEFAULT_FIELDS + \
     ('title', 'comments')
+
+PLAYLIST_DEFAULT_FIELDS = ('title')
+# May add a PLAYLIST_ITEM_DEFAULT_FIELDS that allows searching by
+# playlist items
 
 # Special path format key.
 PF_KEY_DEFAULT = 'default'
@@ -344,6 +388,70 @@ class Item(object):
         # Perform substitution.
         return template.substitute(mapping, funcs)
 
+class PlaylistItem(object):
+    def __init__(self, values):
+        self.dirty = {}
+        self._fill_record(values)
+        self._clear_dirty()
+
+    def _fill_record(self, values):
+        self.record = {}
+        for key in PLAYLIST_ITEM_KEYS:
+            try:
+                setattr(self, key, values[key])
+            except KeyError:
+                setattr(self, key, None)
+
+    def _clear_dirty(self):
+        self.dirty = {}
+        for key in PLAYLIST_ITEM_KEYS:
+            self.dirty[key] = False
+
+    def _get_playlist(self):
+        """
+        Returns parent Playlist object.
+        TODO (dcode) - Does this require any sort of singleton?
+        """
+        playlist_id = self.record[playlist_id]
+        return # TODO (dcode) - Must construct a playlist here
+
+
+    def __repr__(self):
+        return 'PlaylistItem(' + repr(self.record) + ')'
+
+    # PlaylistItem field accessors
+    def __getattr__(self, key):
+        """If key is a PlaylistItem attribute (i.e. a column in the database),
+        return the record entry for that key.
+        """
+        if key in PLAYLIST_ITEM_KEYS:
+            return self.record[key]
+        else:
+            raise AttributeError(key + ' is not a valid PlaylistItem field')
+
+    def __setattr__(self, key, value):
+        """If key is a playlist item attribute (i.e., a column in the database),
+        sets the record entry for that key to value. Note that to change
+        the attribute in the database, one must call store() or write().
+
+        Otherwise, performs ordinary setattr
+        """
+        if key in PLAYLIST_ITEM_KEYS:
+            # If the value changed, mark the field as dirty.
+            if (not (key in self.record)) or (self.record[key] != value):
+                self.record[key] = value
+                self.dirty[key] = True
+                # TODO (dcode) - Does this operation increment the parent version?
+        else:
+            super(PlaylistItem, self).__setattr__(key, value)
+
+    def evaluate_template(self, template, lib=None, sanitize=False, pathmod=None):
+        """Evaluates a Template object using the PlaylistItem's fields. If `lib`
+        is provided, it is used to map some values. This interfaces was chosen to
+        match the interface provided by Item.
+        """
+        # TODO (dcode) - Add template function as in the rest of the beets objects
+        pass
 
 # Library queries.
 
@@ -703,6 +811,35 @@ class ResultIterator(object):
         row = self.rowiter.next()  # May raise StopIteration.
         return Item(row)
 
+class PlaylistItemResultIterator(object):
+    """An iterator into a PlaylistItem query result set. The iterator lazily
+     constructs PlaylistItem objects that reflect database rows.
+    """
+    def __init__(self, rows):
+        self.rows = rows
+        self.rowiter = iter(self.rows)
+
+    def __iter__(self):
+        return self
+
+    def next(self):
+        row = self.rowiter.next()  # May raise StopIteration.
+        return PlaylistItem(row)
+
+class PlaylistResultIterator(object):
+    """ An iterator into a playlist query result set. The iterator lazily
+    constructs Playlist objects that reflect database rows.
+    """
+    def __init__(self, rows):
+        self.rows = rows
+        self.rowiter = iter(self.rows)
+
+    def __iter__(self):
+        return self
+
+    def next(self):
+        row = self.rowiter.next()  # May raise StopIteration.
+        return Playlist(row)
 
 # An abstract library.
 
@@ -729,6 +866,9 @@ class BaseLibrary(object):
         else:
             default_fields = ITEM_DEFAULT_FIELDS
             all_keys = ITEM_KEYS
+
+        # TODO (dcode) - Add logic to allow searching for playlists
+        # (what does that mean?)
 
         # Convert a single string into a list of space-separated
         # criteria.
@@ -761,11 +901,26 @@ class BaseLibrary(object):
         """
         raise NotImplementedError
 
+    def load_playlist(self, playlist, load_id=None):
+        """
+        Refresh the playlist's metadata from the library databsae. If
+        load_id is not specified, use the playlist's id.
+        """
+        raise NotImplementedError
+
     def store(self, item, store_id=None, store_all=False):
         """Save the item's metadata into the library database. If
         store_id is specified, use it instead of the item's current id.
         If store_all is true, save the entire record instead of just
         the dirty fields.
+        """
+        raise NotImplementedError
+
+    def store_playlist(self, playlist, store_id=None, store_all=False):
+        """
+        Save the playlist's metadata into the library databse. If store_id
+        is not specified, use the playlist's id. If store_all is true,
+        save the entire record instead of just the dirty fields.
         """
         raise NotImplementedError
 
@@ -775,6 +930,12 @@ class BaseLibrary(object):
         """
         raise NotImplementedError
 
+    def remove_playlist(self, playlist):
+        """
+        Removes the playlist (and associated PlaylistItems) from the
+        database.
+        """
+        raise NotImplementedError
 
     # Browsing operations.
     # Naive implementations are provided, but these methods should be
@@ -785,6 +946,15 @@ class BaseLibrary(object):
         be None (match the entire library), a Query object, or a query
         string. If default_fields is specified, it restricts the fields
         that may be matched by unqualified query string terms.
+        """
+        raise NotImplementedError
+
+    def _get_playlist(self, query=None, default_fields=None):
+        """
+        Returns a sequence of playlists matching query, which may be
+        None (match all playlists), a Query objects, or a query string.
+        If default_fields is specified, it restricts the fields that
+        may be matched by unqualified query string terms.
         """
         raise NotImplementedError
 
@@ -833,18 +1003,35 @@ class BaseLibrary(object):
                    cmp(a.track, b.track)
         return sorted(out, compare)
 
-class BaseAlbum(object):
-    """Represents an album in the library, which in turn consists of a
+    def playlists(self, title=None, query=None):
+        """
+        Returns a sorted list of BasePlaylist objects, possibly filtered
+        by title or an arbitrary query. Unqualified query string terms
+        match only fields that apply to a playlist. This is currently
+        limited to: title
+        TODO (dcode) - Add capability to search other interesting
+        playlist fields: total time, artists, song items, genre ???
+        """
+        out = []
+        for playlist in self._get_playlist(query, PLAYLIST_DEFAULT_FIELDS):
+            if (title is None or playlist.title == title):
+                out.append(playlist)
+
+        # Sort by: title
+        return sorted(out, key=lambda playlist: playlist.title)
+
+class BasePlaylist(object):
+    """Represents a playlist in the library, which in turn consists of a
     collection of items in the library.
 
-    This base version just reflects the metadata of the album's items
+    This base version just reflects the metadata of the playlist's items
     and therefore isn't particularly useful. The items are referenced
-    by the record's album and artist fields. Implementations can add
-    album-level metadata or use distinct backing stores.
+    by a lookup table resulting in item objects. Implementations can add
+    playlist-level metadata or use distinct backing stores.
     """
     def __init__(self, library, record):
-        super(BaseAlbum, self).__setattr__('_library', library)
-        super(BaseAlbum, self).__setattr__('_record', record)
+        super(BasePlaylist, self).__setattr__('_library', library)
+        super(BasePlaylist, self).__setattr__('_record', record)
 
     def __getattr__(self, key):
         """Get the value for an album attribute."""
@@ -854,14 +1041,14 @@ class BaseAlbum(object):
             raise AttributeError('no such field %s' % key)
 
     def __setattr__(self, key, value):
-        """Set the value of an album attribute, modifying each of the
-        album's items.
+        """
+        Set the value of a playlist attribute, incrementing the version
         """
         if key in self._record:
             # Reflect change in this object.
             self._record[key] = value
             # Modify items.
-            if key in ALBUM_KEYS_ITEM:
+            if key in PLAYLIST_ITEM_KEYS:
                 items = self._library.items(albumartist=self.albumartist,
                                             album=self.album)
                 for item in items:
@@ -1301,6 +1488,58 @@ class Library(BaseLibrary):
             album_id = tx.mutate(sql, subvals)
 
             # Add the items to the library.
+            for item in items:
+                item.album_id = album_id
+                if item.id is None:
+                    self.add(item)
+                else:
+                    self.store(item)
+
+        # Construct the new Album object.
+        record = {}
+        for key in ALBUM_KEYS:
+            if key in ALBUM_KEYS_ITEM:
+                record[key] = item_values[key]
+            else:
+                # Non-item fields default to None.
+                record[key] = None
+        record['id'] = album_id
+        album = Album(self, record)
+
+        return album
+
+    def add_playlist(self, title, items=None, flags=None):
+        """
+        Create a new playlist in the database with title as specified and
+        initially consisting of the items specified. Returns a Playlist object.
+
+        Additionally, flags can contain a dictionary containing any of:
+            repeat, single, consume, random
+        which will override the defaults
+        """
+
+        defaults = {
+            'title'  : title,
+            'current_song': 0,
+            'version': 0,
+            'repeat' : False,
+            'single' : False,
+            'consume': False,
+            'random' : False,
+        }
+
+        if flags is not None:
+            defaults.update(flags)
+
+        with self.transaction() as tx:
+            sql = 'INSERT INTO playlists (%s) VALUES (%s)' %\
+                  (', '.join(PLAYLIST_KEYS_META),
+                   ', '.join(['?'] * len(PLAYLIST_KEYS_META)))
+            subvals = [defaults[key] for key in PLAYLIST_KEYS_META]
+            playlist_id = tx.mutate(sql, subvals)
+
+            # Add the items to the library.
+            # XXX PICKUP CODING HERE!!
             for item in items:
                 item.album_id = album_id
                 if item.id is None:
